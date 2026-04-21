@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+src/data/uploads/
+
+# Editor / OS
+.DS_Store
+.idea/
+*.log.swp
+
+# Internal guidance (not for the public repo)
+CLAUDE.md

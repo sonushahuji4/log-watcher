@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Log Watcher</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap');
+ 
+    :root {
+      --bg: #0a0c0f;
+      --surface: #10141a;
+      --border: #1e2530;
+      --accent: #00e5a0;
+      --accent-dim: rgba(0, 229, 160, 0.12);
+      --muted: #4a5568;
+      --text: #c9d1d9;
+      --new-line-glow: rgba(0, 229, 160, 0.08);
+    }
+ 
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+ 
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+ 
+    /* ── Header ─────────────────────────────────── */
+    header {
+      padding: 18px 28px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: var(--surface);
+    }
+ 
+    header h1 {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+ 
+    .badge {
+      font-size: 0.65rem;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+ 
+    #status-badge {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid rgba(0,229,160,0.25);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+ 
+    #status-badge.disconnected {
+      background: rgba(248,81,73,0.1);
+      color: #f85149;
+      border-color: rgba(248,81,73,0.25);
+    }
+ 
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse 2s infinite;
+    }
+ 
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+ 
+    #line-count {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+ 
+    /* ── Log panel ──────────────────────────────── */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+      overflow: hidden;
+    }
+ 
+    #log-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 28px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      scroll-behavior: smooth;
+    }
+ 
+    /* Custom scrollbar */
+    #log-container::-webkit-scrollbar { width: 5px; }
+    #log-container::-webkit-scrollbar-track { background: transparent; }
+    #log-container::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 999px;
+    }
+ 
+    .log-line {
+      display: flex;
+      gap: 16px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      line-height: 1.6;
+      border-left: 2px solid transparent;
+      transition: background 0.2s;
+    }
+ 
+    .log-line:hover {
+      background: rgba(255,255,255,0.03);
+    }
+ 
+    .log-line.new {
+      border-left-color: var(--accent);
+      background: var(--new-line-glow);
+      animation: slideIn 0.25s ease;
+    }
+ 
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-6px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+ 
+    .line-num {
+      color: var(--muted);
+      min-width: 36px;
+      text-align: right;
+      user-select: none;
+      flex-shrink: 0;
+    }
+ 
+    .line-text {
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+ 
+    /* Colourize common log levels */
+    .level-error { color: #f85149; }
+    .level-warn  { color: #e3b341; }
+    .level-info  { color: #58a6ff; }
+    .level-debug { color: #8b949e; }
+ 
+    /* ── Empty state ────────────────────────────── */
+    #empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+ 
+    #empty svg { opacity: 0.25; }
+ 
+    /* ── Footer ─────────────────────────────────── */
+    footer {
+      padding: 10px 28px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: var(--surface);
+    }
+ 
+    #auto-scroll-toggle {
+      cursor: pointer;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.7rem;
+      transition: all 0.15s;
+    }
+ 
+    #auto-scroll-toggle:hover,
+    #auto-scroll-toggle.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ── Upload form ────────────────────────────── */
+    #upload-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: 12px;
+    }
+
+    #file-input {
+      font-family: inherit;
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: none;
+      border: 1px dashed var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      max-width: 240px;
+    }
+
+    #upload-btn {
+      cursor: pointer;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.7rem;
+      transition: all 0.15s;
+    }
+
+    #upload-btn:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    #upload-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    #watching-label {
+      font-size: 0.65rem;
+      color: var(--muted);
+      margin-left: 8px;
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+ 
+<header>
+  <h1>⬡ Log Watcher</h1>
+  <span class="badge" id="status-badge">
+    <span class="dot"></span>
+    <span id="status-text">Connecting…</span>
+  </span>
+  <span id="watching-label" title=""></span>
+  <form id="upload-form">
+    <input type="file" id="file-input" name="file" required />
+    <button type="submit" id="upload-btn">⬆ Watch this file</button>
+  </form>
+  <span id="line-count">0 lines</span>
+</header>
+ 
+<main>
+  <div id="log-container">
+    <div id="empty">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="16" y1="13" x2="8" y2="13"/>
+        <line x1="16" y1="17" x2="8" y2="17"/>
+        <line x1="10" y1="9"  x2="8" y2="9"/>
+      </svg>
+      Waiting for log entries…
+    </div>
+  </div>
+</main>
+ 
+<footer>
+  <span id="last-update">No updates yet</span>
+  <button id="auto-scroll-toggle" class="active">⬇ Auto-scroll ON</button>
+</footer>
+ 
+<!-- Socket.IO client — served automatically by the Socket.IO server -->
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const container     = document.getElementById('log-container');
+  let   emptyState    = document.getElementById('empty');
+  const statusBadge   = document.getElementById('status-badge');
+  const statusText    = document.getElementById('status-text');
+  const lineCountEl   = document.getElementById('line-count');
+  const lastUpdateEl  = document.getElementById('last-update');
+  const scrollToggle  = document.getElementById('auto-scroll-toggle');
+  const uploadForm    = document.getElementById('upload-form');
+  const fileInput     = document.getElementById('file-input');
+  const uploadBtn     = document.getElementById('upload-btn');
+  const watchingLabel = document.getElementById('watching-label');
+
+  let lineNumber  = 0;
+  let autoScroll  = true;
+
+  // Show which file the server is currently watching
+  fetch('/health').then(r => r.json()).then(h => {
+    if (h?.watching) {
+      watchingLabel.textContent = '📄 ' + h.watching;
+      watchingLabel.title = h.watching;
+    }
+  }).catch(() => {});
+ 
+  scrollToggle.addEventListener('click', () => {
+    autoScroll = !autoScroll;
+    scrollToggle.textContent = autoScroll ? '⬇ Auto-scroll ON' : '⬇ Auto-scroll OFF';
+    scrollToggle.classList.toggle('active', autoScroll);
+  });
+ 
+  // ── Helpers ──────────────────────────────────────────────────────────────
+ 
+  function levelClass(text) {
+    const t = text.toLowerCase();
+    if (/\berror\b|\bfatal\b|\bcritical\b/.test(t)) return 'level-error';
+    if (/\bwarn(ing)?\b/.test(t))                    return 'level-warn';
+    if (/\binfo\b/.test(t))                          return 'level-info';
+    if (/\bdebug\b|\btrace\b/.test(t))               return 'level-debug';
+    return '';
+  }
+ 
+  function appendLines(lines, isNew = false) {
+    if (!lines.length) return;
+ 
+    // Remove empty state placeholder on first real content
+    emptyState?.remove();
+ 
+    const frag = document.createDocumentFragment();
+    for (const text of lines) {
+      if (!text.trim()) continue;
+      lineNumber++;
+ 
+      const row  = document.createElement('div');
+      row.className = 'log-line' + (isNew ? ' new' : '');
+ 
+      const num  = document.createElement('span');
+      num.className = 'line-num';
+      num.textContent = lineNumber;
+ 
+      const body = document.createElement('span');
+      body.className = `line-text ${levelClass(text)}`;
+      body.textContent = text;
+ 
+      row.appendChild(num);
+      row.appendChild(body);
+      frag.appendChild(row);
+    }
+ 
+    container.appendChild(frag);
+    lineCountEl.textContent = `${lineNumber} lines`;
+    lastUpdateEl.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+ 
+    if (autoScroll) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }
+ 
+  // ── Socket.IO Connection ──────────────────────────────────────────────────
+  // Socket.IO client is served automatically by the server at /socket.io/socket.io.js
+ 
+  const socket = io();   // auto-connects to the page's own origin
+ 
+  // Bootstrap: last 10 lines sent only to this socket on connect
+  socket.on('init', (lines) => {
+    appendLines(lines, false);
+    setStatus(true);
+  });
+ 
+  // Live updates broadcast to all clients
+  socket.on('update', (lines) => {
+    appendLines(lines, true);
+  });
+ 
+  // Server broadcasts this when the watched file is swapped (e.g. after upload)
+  socket.on('reset', () => {
+    container.innerHTML = '';
+    lineNumber = 0;
+    lineCountEl.textContent = '0 lines';
+    lastUpdateEl.textContent = 'No updates yet';
+
+    // Restore empty-state placeholder until next batch arrives
+    emptyState = document.createElement('div');
+    emptyState.id = 'empty';
+    emptyState.textContent = 'Waiting for log entries…';
+    container.appendChild(emptyState);
+  });
+
+  socket.on('watcher-error', (payload) => {
+    console.error('Watcher error:', payload?.message);
+    statusText.textContent = 'Watcher error';
+    statusBadge.classList.add('disconnected');
+  });
+
+  // Socket.IO handles reconnection automatically — just reflect state in the UI
+  socket.on('connect',    () => setStatus(true));
+  socket.on('disconnect', () => setStatus(false));
+
+  function setStatus(online) {
+    statusText.textContent = online ? 'Live' : 'Reconnecting…';
+    statusBadge.classList.toggle('disconnected', !online);
+  }
+
+  // ── Upload handler ───────────────────────────────────────────────────────
+  uploadForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const file = fileInput.files?.[0];
+    if (!file) return;
+
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = 'Uploading…';
+
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      const body = await res.json().catch(() => ({}));
+
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+
+      watchingLabel.textContent = '📄 ' + (body.file?.watching || file.name);
+      watchingLabel.title = body.file?.watching || file.name;
+      fileInput.value = '';
+    } catch (err) {
+      alert('Upload failed: ' + (err?.message || err));
+    } finally {
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = '⬆ Watch this file';
+    }
+  });
+</script>
+</body>
+</html>
