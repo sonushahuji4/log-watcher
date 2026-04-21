@@ -1,6 +1,7 @@
-import { Router, Request, Response, NextFunction } from "express";
+import express, { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
 import path from "path";
+import { promises as fsp } from "fs";
 import type { Config } from "./config";
 import type { LogWatcher } from "./logWatcher";
 import type { UploadService } from "./uploadService";
@@ -59,6 +60,22 @@ export function createRoutes(deps: RouteDeps): Router {
             }
             const result = await uploadService.swap(req.file);
             res.json({ ok: true, file: result });
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    router.post("/append", express.json({ limit: "1mb" }), async (req: Request, res: Response, next: NextFunction) => {
+        try {
+            const text = (req.body as { text?: unknown })?.text;
+            if (typeof text !== "string" || text.length === 0) {
+                res.status(400).json({ error: "Expected JSON body with non-empty 'text' string" });
+                return;
+            }
+            // Ensure a trailing newline so the tailer sees a complete line.
+            const payload = text.endsWith("\n") ? text : text + "\n";
+            await fsp.appendFile(watcher.getFilePath(), payload, "utf8");
+            res.json({ ok: true, bytesWritten: Buffer.byteLength(payload, "utf8"), watching: watcher.getFilePath() });
         } catch (err) {
             next(err);
         }

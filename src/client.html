@@ -257,6 +257,55 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    /* ── Append form ────────────────────────────── */
+    #append-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      margin-right: 12px;
+    }
+
+    #append-input {
+      flex: 1;
+      max-width: 480px;
+      font-family: inherit;
+      font-size: 0.72rem;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 5px 10px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    #append-input:focus {
+      border-color: var(--accent);
+    }
+
+    #append-btn {
+      cursor: pointer;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.7rem;
+      transition: all 0.15s;
+    }
+
+    #append-btn:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    #append-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -291,6 +340,10 @@
 </main>
  
 <footer>
+  <form id="append-form">
+    <input type="text" id="append-input" placeholder="Type a line to append to the watched file… (Enter to send)" autocomplete="off" />
+    <button type="submit" id="append-btn">➕ Append</button>
+  </form>
   <span id="last-update">No updates yet</span>
   <button id="auto-scroll-toggle" class="active">⬇ Auto-scroll ON</button>
 </footer>
@@ -309,6 +362,9 @@
   const fileInput     = document.getElementById('file-input');
   const uploadBtn     = document.getElementById('upload-btn');
   const watchingLabel = document.getElementById('watching-label');
+  const appendForm    = document.getElementById('append-form');
+  const appendInput   = document.getElementById('append-input');
+  const appendBtn     = document.getElementById('append-btn');
 
   let lineNumber  = 0;
   let autoScroll  = true;
@@ -444,6 +500,35 @@
     } finally {
       uploadBtn.disabled = false;
       uploadBtn.textContent = '⬆ Watch this file';
+    }
+  });
+
+  // ── Append handler ───────────────────────────────────────────────────────
+  // Posts text to /append; the server writes it to the watched file, and the
+  // regular tailer → socket broadcast path renders it on every connected client.
+  appendForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = appendInput.value;
+    if (!text.length) return;
+
+    appendBtn.disabled = true;
+    appendInput.disabled = true;
+
+    try {
+      const res = await fetch('/append', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      appendInput.value = '';
+    } catch (err) {
+      alert('Append failed: ' + (err?.message || err));
+    } finally {
+      appendBtn.disabled = false;
+      appendInput.disabled = false;
+      appendInput.focus();
     }
   });
 </script>
