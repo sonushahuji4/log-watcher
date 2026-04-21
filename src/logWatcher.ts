@@ -1,30 +1,113 @@
 import fs from "fs/promises";
 import { createReadStream } from "fs";
-import { EventEmitter } from "events";
 import { StringDecoder } from "string_decoder";
+import { TypedEventEmitter } from "./typedEmitter";
+import type { ITailer } from "./tailer";
 
-export class LogWatcher extends EventEmitter {
+export type LogWatcherEvents = {
+    lines: [string[]];
+    error: [Error];
+    swapped: [string];
+};
 
+type State = "idle" | "running" | "stopping" | "swapping";
+
+/**
+ * Tails a log file and emits new lines as they arrive. Composes an ITailer
+ * for change notifications, so the swap between fs.watch and polling is
+ * just a different constructor arg.
+ *
+ * Lifecycle is an explicit state machine:
+ *   idle ──start──▶ running
+ *   running ──stop──▶ stopping ──▶ idle
+ *   running ──setFile──▶ swapping ──▶ running
+ * Rejects start() from non-idle and setFile() from non-running so concurrent
+ * calls can't tangle lastSize / tailBuffer.
+ */
+export class LogWatcher extends TypedEventEmitter<LogWatcherEvents> {
     private filePath: string;
     private lastSize: number = 0;
     private tailBuffer: string = "";
-    private abortController: AbortController | null = null;
-    private runningPromise: Promise<void> | null = null;
+    private state: State = "idle";
+    private readonly tailer: ITailer;
+    private pendingChange: Promise<void> = Promise.resolve();
+    private readonly onChangeBound = () => {
+        this.pendingChange = this.pendingChange
+            .then(() => this.onChange())
+            .catch((err) => { this.emit("error", err as Error); });
+    };
+    private readonly onTailerErrorBound = (err: Error) => { this.emit("error", err); };
 
-    constructor(filePath: string) {
+    constructor(filePath: string, tailer: ITailer) {
         super();
         this.filePath = filePath;
+        this.tailer = tailer;
+        this.tailer.on("change", this.onChangeBound);
+        this.tailer.on("error", this.onTailerErrorBound);
     }
 
-    public getFilePath(): string {
+    getFilePath(): string {
         return this.filePath;
     }
 
-    public getLastSize(): number {
+    getLastSize(): number {
         return this.lastSize;
     }
 
-    public getLastNLines = async (n: number): Promise<string[]> => {
+    getState(): State {
+        return this.state;
+    }
+
+    /** Resolves once any in-flight change handler has finished. Useful in tests. */
+    async waitIdle(): Promise<void> {
+        await this.pendingChange;
+    }
+
+    async start(): Promise<void> {
+        if (this.state !== "idle") {
+            throw new Error(`Cannot start LogWatcher from state '${this.state}'`);
+        }
+        try {
+            this.lastSize = await this.currentSizeOrZero();
+            await this.tailer.start(this.filePath);
+            this.state = "running";
+        } catch (err) {
+            this.state = "idle";
+            throw err;
+        }
+    }
+
+    async stop(): Promise<void> {
+        if (this.state === "idle" || this.state === "stopping") return;
+        this.state = "stopping";
+        try {
+            await this.tailer.stop();
+        } finally {
+            this.state = "idle";
+        }
+    }
+
+    async setFile(newPath: string): Promise<void> {
+        if (this.state !== "running") {
+            throw new Error(`Cannot swap file from state '${this.state}'`);
+        }
+        this.state = "swapping";
+        try {
+            await this.tailer.stop();
+            this.filePath = newPath;
+            this.tailBuffer = "";
+            this.lastSize = await this.currentSizeOrZero();
+            await this.tailer.start(newPath);
+            this.state = "running";
+            this.emit("swapped", newPath);
+        } catch (err) {
+            this.state = "idle";
+            throw err;
+        }
+    }
+
+    async getLastNLines(n: number): Promise<string[]> {
+        if (n <= 0) return [];
         const CHUNK = 4096;
         let file: Awaited<ReturnType<typeof fs.open>>;
         try {
@@ -42,9 +125,6 @@ export class LogWatcher extends EventEmitter {
             const chunks: Buffer[] = [];
             let newlineCount = 0;
 
-            // Read backwards in CHUNK-sized slices, accumulating raw bytes at the
-            // correct offset. Decode once at the end so multi-byte UTF-8 chars
-            // that straddle a chunk boundary aren't corrupted.
             while (position > 0 && newlineCount <= n) {
                 const readSize = Math.min(CHUNK, position);
                 position -= readSize;
@@ -64,77 +144,36 @@ export class LogWatcher extends EventEmitter {
         } finally {
             await file.close();
         }
-    };
-
-    public start(): void {
-        if (this.runningPromise) return;
-        this.abortController = new AbortController();
-        const { signal } = this.abortController;
-
-        this.runningPromise = this.watchFile(signal).catch((err) => {
-            if (err?.name !== "AbortError") this.emit("error", err);
-        });
     }
 
-    public async stop(): Promise<void> {
-        this.abortController?.abort();
-        this.abortController = null;
-        if (this.runningPromise) {
-            await this.runningPromise;
-            this.runningPromise = null;
-        }
-    }
+    private async onChange(): Promise<void> {
+        if (this.state !== "running") return;
 
-    public setFile = async (newPath: string): Promise<void> => {
-        await this.stop();
-        this.filePath = newPath;
-        this.lastSize = 0;
-        this.tailBuffer = "";
-        this.start();
-    };
-
-    private watchFile = async (signal: AbortSignal): Promise<void> => {
+        let currentSize: number;
         try {
-            const { size } = await fs.stat(this.filePath);
-            this.lastSize = size;
-        } catch (err: any) {
-            if (err?.code === "ENOENT") {
-                await fs.writeFile(this.filePath, "");
-                this.lastSize = 0;
-            } else {
-                throw err;
-            }
+            ({ size: currentSize } = await fs.stat(this.filePath));
+        } catch {
+            return;
         }
 
-        const watcher = fs.watch(this.filePath, { signal });
+        if (currentSize < this.lastSize) {
+            this.lastSize = 0;
+            this.tailBuffer = "";
+        }
+        if (currentSize === this.lastSize) return;
 
-        for await (const event of watcher) {
-            if (event.eventType !== "change") continue;
+        const start = this.lastSize;
+        const length = currentSize - start;
+        this.lastSize = currentSize;
 
-            let currentSize: number;
-            try {
-                ({ size: currentSize } = await fs.stat(this.filePath));
-            } catch {
-                continue;
-            }
-
-            // Rotation or truncation: restart from the top of the new file.
-            if (currentSize < this.lastSize) {
-                this.lastSize = 0;
-                this.tailBuffer = "";
-            }
-
-            if (currentSize === this.lastSize) continue;
-
-            const start = this.lastSize;
-            const length = currentSize - start;
-            this.lastSize = currentSize;
-
+        try {
             await this.readDelta(start, length);
+        } catch (err) {
+            this.emit("error", err as Error);
         }
-    };
+    }
 
-    private readDelta = async (start: number, length: number): Promise<void> => {
+    private async readDelta(start: number, length: number): Promise<void> {
         const stream = createReadStream(this.filePath, {
             start,
             end: start + length - 1,
@@ -154,5 +193,15 @@ export class LogWatcher extends EventEmitter {
         this.tailBuffer += decoder.end();
 
         if (newLines.length > 0) this.emit("lines", newLines);
-    };
+    }
+
+    private async currentSizeOrZero(): Promise<number> {
+        try {
+            const { size } = await fs.stat(this.filePath);
+            return size;
+        } catch (err: any) {
+            if (err?.code === "ENOENT") return 0;
+            throw err;
+        }
+    }
 }

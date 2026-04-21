@@ -69,10 +69,12 @@ Copy or create a `.env` file in the repo root. All variables are optional.
 
 | Variable        | Default                 | Description                                         |
 | --------------- | ----------------------- | --------------------------------------------------- |
-| `PORT`          | `3000`                  | HTTP port for the server.                           |
-| `LOG_FILE`      | `src/data/logs.txt`     | Initial file to tail. Created if it doesn't exist.  |
-| `UPLOAD_DIR`    | `src/data/uploads`      | Where uploaded files are persisted.                 |
-| `MAX_UPLOAD_MB` | `50`                    | Upload size limit in megabytes.                     |
+| `PORT`              | `3000`                  | HTTP port for the server.                                        |
+| `LOG_FILE`          | `src/data/logs.txt`     | Initial file to tail. Created if it doesn't exist.               |
+| `UPLOAD_DIR`        | `src/data/uploads`      | Where uploaded files are persisted.                              |
+| `MAX_UPLOAD_MB`     | `50`                    | Upload size limit in megabytes.                                  |
+| `TAILER_STRATEGY`   | `watch`                 | `watch` (fs.watch) or `poll` (stat-based). Use `poll` if your writer does atomic-save renames. |
+| `POLL_INTERVAL_MS`  | `500`                   | Polling interval when `TAILER_STRATEGY=poll` (min 50).            |
 
 ## HTTP endpoints
 
@@ -94,32 +96,29 @@ Copy or create a `.env` file in the repo root. All variables are optional.
 
 ## Architecture
 
+The code is split along responsibility lines so each file does one thing and can be tested in isolation. `server.ts` is a thin composition root; everything else is a focused module.
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         server.ts                           │
-│                                                             │
-│   Express 5 ──┬── GET /log          → sendFile(client.html) │
-│               ├── GET /health       → JSON status           │
-│               ├── POST /upload      → multer → setFile()    │
-│               └── GET /             → redirect /log         │
-│                                                             │
-│   Socket.IO ──┬── on 'connection'   → emit 'init' (last 10) │
-│               └── on LogWatcher     → emit 'update' (new)   │
-│                    'lines' event                            │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   LogWatcher (EventEmitter)                 │
-│                                                             │
-│   start()    → fs.watch(filePath) → reads [lastSize, size)  │
-│                splits on '\n', emits 'lines'                │
-│   stop()     → aborts the watcher cleanly                   │
-│   setFile()  → stop, reset, restart on a new path           │
-│                                                             │
-│   getLastNLines(n) → reverse-chunk read of the file tail    │
-└─────────────────────────────────────────────────────────────┘
+server.ts (bootstrap)
+├── config.ts              env parsing + validation → frozen Config
+├── logWatcher.ts          state machine (idle/running/stopping/swapping)
+│      │                   delegates change-detection to ↓
+│      └── tailer.ts       ITailer interface
+│                          ├── FsWatchTailer  (fs.watch — low overhead)
+│                          └── PollingTailer  (stat poll — atomic-save safe)
+├── socketHub.ts           wires watcher events ↔ Socket.IO broadcasts
+├── uploadService.ts       domain: persist file → setFile → reset+init
+├── routes.ts              Express Router: /, /log, /health, POST /upload
+├── shutdownManager.ts     SIGINT/SIGTERM → reverse-order hook runner
+└── typedEventEmitter.ts   type-safe wrapper around Node's EventEmitter
 ```
+
+### Design decisions
+
+- **Strategy pattern for the tailer.** `LogWatcher` owns offsets, byte math, and line semantics. It composes an `ITailer` that just says "something changed." Swapping `fs.watch` for polling is a one-line config change.
+- **Explicit state machine in `LogWatcher`.** Transitions are `idle → running`, `running → stopping → idle`, and `running → swapping → running`. `start()` rejects from non-idle, `setFile()` rejects from non-running — concurrent calls can't tangle `lastSize` / `tailBuffer`.
+- **Typed events.** `TypedEventEmitter<T>` gives compile-time safety for `.on()`, `.emit()`, `.once()` against an explicit event-map type (`LogWatcherEvents`, `TailerEvents`).
+- **Composition root.** All construction happens in `bootstrap()`. No module reaches into `process.env` except `config.ts`. Each module takes its dependencies as constructor / function args, which is why the tests can drive `LogWatcher` with a `MockTailer` and `UploadService` with stub dependencies.
 
 ### Key correctness details
 
@@ -133,13 +132,42 @@ Copy or create a `.env` file in the repo root. All variables are optional.
 
 ```
 src/
-├── server.ts        # Express + Socket.IO wiring, routes, shutdown
-├── logWatcher.ts    # File watcher (EventEmitter): start/stop/setFile/tail
-├── client.html      # Single-page viewer served at /log
+├── server.ts             # bootstrap / composition root (~55 lines)
+├── config.ts             # env parsing + validation
+├── logWatcher.ts         # state machine + tail reading + getLastNLines
+├── tailer.ts             # ITailer + FsWatchTailer + PollingTailer
+├── socketHub.ts          # wires LogWatcher events ↔ Socket.IO
+├── uploadService.ts      # domain: persist + swap + broadcast
+├── routes.ts             # Express Router + error middleware
+├── shutdownManager.ts    # graceful shutdown
+├── typedEmitter.ts       # TypedEventEmitter<T>
+├── client.html           # SPA viewer served at /log
 └── data/
-    ├── logs.txt     # Default tailed file (checked in with sample lines)
-    └── uploads/     # Uploaded files land here (gitignored)
+    ├── logs.txt          # Default tailed file (sample content)
+    └── uploads/          # Uploaded files land here (gitignored)
+
+test/
+├── config.test.ts        # env parsing, validation, defaults
+├── logWatcher.test.ts    # tailing, rotation, state machine, UTF-8
+└── shutdownManager.test.ts
 ```
+
+## Tests
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner (`node --test`) with `ts-node/register`. No additional test framework. The suite covers:
+
+- `getLastNLines`: missing file, empty file, <n lines, >n lines, multi-byte UTF-8 straddling chunk boundaries.
+- Partial-line buffering across multiple change events.
+- Rotation / truncation detection.
+- State-machine transitions and invalid-transition rejection.
+- `swapped` event on `setFile`.
+- Error propagation from tailer → watcher.
+- `Config` defaults, overrides, validation, and freezing.
+- `ShutdownManager` ordering, async hooks, and throw-tolerance.
 
 ## Scripts
 
